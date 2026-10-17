@@ -1,16 +1,21 @@
 #!/bin/bash
-echo "==> Thoroughly cleaning port 3000 and PM2..."
-npx pm2 delete jsibra-app || true
-npx pm2 kill || true
-fuser -k 3000/tcp || true
-pkill -9 -f node || true
-sleep 2
+# Deploy aman: hanya menyentuh proses "jsibra-app". Service lain (room-api di :3100, /api/ae di :3005) tidak ikut dimatikan.
+set -euo pipefail
+cd "$(dirname "$0")"
 
-echo "==> Building Next.js app..."
+echo "==> Install dependency (sesuai package-lock)..."
+npm ci
+
+echo "==> Build Next.js..."
 npm run build
 
-echo "==> Starting PM2..."
-npx pm2 start node_modules/next/dist/bin/next --name "jsibra-app" -- start -p 3000
+echo "==> Jalankan ulang jsibra-app via PM2..."
+if npx pm2 describe jsibra-app >/dev/null 2>&1; then
+  npx pm2 reload jsibra-app --update-env
+else
+  npx pm2 start node_modules/next/dist/bin/next --name "jsibra-app" -- start -p 3000
+fi
+npx pm2 save
 
-echo "==> Done:"
+echo "==> Status:"
 npx pm2 list
