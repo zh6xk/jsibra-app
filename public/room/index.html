@@ -2,20 +2,22 @@
 <html lang="id">
 <head>
   <meta charset="utf-8" />
+  <meta name="theme-color" content="#171009" />
+  <meta name="color-scheme" content="dark" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Nama Kamu · 3D Room Portfolio</title>
   <script type="module" crossorigin src="./assets/index-BdTM54ac.js"></script>
-  <link rel="stylesheet" crossorigin href="./assets/index-FdVV_WNV.css">
+  <link rel="stylesheet" crossorigin href="./assets/ui-v2.css">
 </head>
 <body>
   <canvas id="c"></canvas>
   <div id="top">
     <div class="brand">🛋️ Nama Kamu · Room</div>
-    <div class="row"><button id="gx">⚙ Grafis</button><button id="sd" title="Suara ambient" aria-label="Suara ambient">🔊</button><button id="wb">🚶 Jalan</button><button id="tm">🌇 Senja</button></div>
+    <div class="row"><button id="gx" title="Pengaturan grafis" aria-label="Pengaturan grafis">⚙ Grafis</button><button id="sd" title="Suara ambient" aria-label="Suara ambient">🔊</button><button id="wb">🚶 Jalan</button><button id="tm">🌇 Senja</button></div>
   </div>
   <div id="hint"></div>
   <div id="tip"></div>
-  <div id="panel"></div>
+  <div id="panel" role="dialog" aria-label="Detail"></div>
   <div id="nav"></div>
   <div id="vig"></div>
   <div id="fps"></div>
