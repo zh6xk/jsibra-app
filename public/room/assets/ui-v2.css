@@ -150,3 +150,8 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--ac);outline-off
   .dot:after,#loading:before,#stars i{animation:none}
   #panel,#gfx{transition:opacity .2s;transform:none}
 }
+
+/* Titik hotspot disembunyikan (tetap bisa diklik, tidak terlihat) */
+.dot{opacity:0;box-shadow:none;border-color:transparent;background:transparent}
+.dot:after{display:none}
+.dot:hover{background:transparent;box-shadow:none}
