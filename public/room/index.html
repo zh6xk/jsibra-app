@@ -9,12 +9,44 @@
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🛋️</text></svg>">
   <script type="module" crossorigin src="./assets/index-B-ehhUFx.js"></script>
   <link rel="stylesheet" crossorigin href="./assets/index-Zya-rhoh.css">
+  <style>
+    .row a.top-btn {
+      width: 36px;
+      height: 36px;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+      border-radius: 10px;
+      font: 700 12px/1.2 var(--sf-pro);
+      letter-spacing: .02em;
+      color: var(--fg);
+      background: var(--glass);
+      -webkit-backdrop-filter: blur(14px) saturate(140%);
+      backdrop-filter: blur(14px) saturate(140%);
+      border: 1px solid var(--line);
+      cursor: pointer;
+      text-decoration: none;
+      transition: transform .12s var(--ease), background .16s, border-color .16s, color .16s;
+      touch-action: manipulation;
+    }
+    .row a.top-btn:hover {
+      background: rgba(255, 176, 102, 0.25);
+      border-color: var(--ac);
+      color: var(--fg);
+      transform: scale(1.05);
+    }
+    .row a.top-btn:active {
+      transform: scale(0.96);
+    }
+  </style>
 </head>
 <body>
   <canvas id="c"></canvas>
   <div id="top">
     <div class="brand">🛋️ Ibra Farawowan</div>
-    <div class="row"><button id="gx" title="Pengaturan grafis" aria-label="Pengaturan grafis">⚙️</button><button id="sd" title="Suara ambient" aria-label="Suara ambient">🔊</button><button id="wb" title="Mode jalan" aria-label="Mode jalan">🚶</button><button id="tm" title="Waktu / Pencahayaan" aria-label="Waktu / Pencahayaan">🌇</button></div>
+    <div class="row"><button id="gx" title="Pengaturan grafis" aria-label="Pengaturan grafis">⚙️</button><a href="/tools" target="_top" id="tl" title="Software & Tools" aria-label="Software & Tools" class="top-btn">🛠️</a><button id="sd" title="Suara ambient" aria-label="Suara ambient">🔊</button><button id="wb" title="Mode jalan" aria-label="Mode jalan">🚶</button><button id="tm" title="Waktu / Pencahayaan" aria-label="Waktu / Pencahayaan">🌇</button></div>
   </div>
   <div id="hint"></div>
   <div id="tip"></div>
