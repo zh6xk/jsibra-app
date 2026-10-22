@@ -15,20 +15,562 @@ import {
   Sparkles,
   ExternalLink,
   RefreshCw,
-  Sliders,
   Check,
-  Copy
+  Copy,
 } from "lucide-react";
+
+// ==========================================
+// MP4 ATOM BINARY MANIPULATION HELPERS
+// ==========================================
+function _ss_readU32(buf: Uint8Array, off: number): number {
+  return ((buf[off] << 24) | (buf[off + 1] << 16) | (buf[off + 2] << 8) | buf[off + 3]) >>> 0;
+}
+
+function _ss_writeU32(arr: Uint8Array, off: number, val: number): void {
+  arr[off] = (val >>> 24) & 0xff;
+  arr[off + 1] = (val >>> 16) & 0xff;
+  arr[off + 2] = (val >>> 8) & 0xff;
+  arr[off + 3] = val & 0xff;
+}
+
+interface BoxInfo {
+  offset: number;
+  size: number;
+  contentStart: number;
+  end: number;
+  headerSize: number;
+  type: string;
+}
+
+function _ss_findBox(buf: Uint8Array, start: number, end: number, type: string): BoxInfo | null {
+  let p = start;
+  while (p + 8 <= end) {
+    let size = _ss_readU32(buf, p);
+    const t = String.fromCharCode(buf[p + 4], buf[p + 5], buf[p + 6], buf[p + 7]);
+    if (size === 1) {
+      if (p + 16 > end) break;
+      const hi = _ss_readU32(buf, p + 8);
+      const lo = _ss_readU32(buf, p + 12);
+      size = hi * 4294967296 + lo;
+      if (t === type) return { offset: p, size, contentStart: p + 16, end: p + size, headerSize: 16, type: t };
+      p += size;
+    } else if (size === 0) {
+      size = end - p;
+      if (t === type) return { offset: p, size, contentStart: p + 8, end: p + size, headerSize: 8, type: t };
+      break;
+    } else {
+      if (size < 8) break;
+      if (t === type) return { offset: p, size, contentStart: p + 8, end: p + size, headerSize: 8, type: t };
+      p += size;
+    }
+  }
+  return null;
+}
+
+function _ss_parseBoxes(buf: Uint8Array, start: number, end: number): BoxInfo[] {
+  const boxes: BoxInfo[] = [];
+  let p = start;
+  while (p + 8 <= end) {
+    let size = _ss_readU32(buf, p);
+    const t = String.fromCharCode(buf[p + 4], buf[p + 5], buf[p + 6], buf[p + 7]);
+    let hSize = 8;
+    if (size === 1) {
+      if (p + 16 > end) break;
+      const hi = _ss_readU32(buf, p + 8);
+      const lo = _ss_readU32(buf, p + 12);
+      size = hi * 4294967296 + lo;
+      hSize = 16;
+    } else if (size === 0) {
+      size = end - p;
+    }
+    if (size < 8 || p + size > end) break;
+    boxes.push({ offset: p, size, contentStart: p + hSize, end: p + size, headerSize: hSize, type: t });
+    p += size;
+  }
+  return boxes;
+}
+
+function _ss_findDeep(buf: Uint8Array, start: number, end: number, type: string): BoxInfo | null {
+  const boxes = _ss_parseBoxes(buf, start, end);
+  for (const b of boxes) {
+    if (b.type === type) return b;
+    if (["moov", "trak", "mdia", "minf", "stbl", "edts"].includes(b.type)) {
+      const found = _ss_findDeep(buf, b.contentStart, b.end, type);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function _ss_makeBox(type: string, payload: Uint8Array): Uint8Array {
+  const size = 8 + payload.byteLength;
+  const box = new Uint8Array(size);
+  _ss_writeU32(box, 0, size);
+  for (let i = 0; i < 4; i++) box[4 + i] = type.charCodeAt(i);
+  box.set(payload, 8);
+  return box;
+}
+
+function concatArrays(arrays: Uint8Array[]): Uint8Array {
+  let totalLen = 0;
+  for (const a of arrays) totalLen += a.byteLength;
+  const out = new Uint8Array(totalLen);
+  let off = 0;
+  for (const a of arrays) {
+    out.set(a, off);
+    off += a.byteLength;
+  }
+  return out;
+}
+
+function makeCommentUdta(commentText: string): Uint8Array {
+  const textCmt = new TextEncoder().encode(commentText);
+
+  const cmtData = new Uint8Array(16 + textCmt.length);
+  new DataView(cmtData.buffer).setUint32(0, cmtData.length, false);
+  cmtData.set([0x64, 0x61, 0x74, 0x61, 0, 0, 0, 1, 0, 0, 0, 0], 4);
+  cmtData.set(textCmt, 16);
+
+  const cmtItem = new Uint8Array(8 + cmtData.length);
+  new DataView(cmtItem.buffer).setUint32(0, cmtItem.length, false);
+  cmtItem.set([0xa9, 0x63, 0x6d, 0x74], 4);
+  cmtItem.set(cmtData, 8);
+
+  const ilstSize = 8 + cmtItem.length;
+  const ilstBox = new Uint8Array(ilstSize);
+  new DataView(ilstBox.buffer).setUint32(0, ilstSize, false);
+  ilstBox.set([0x69, 0x6c, 0x73, 0x74], 4);
+  ilstBox.set(cmtItem, 8);
+
+  const hdlrBox = new Uint8Array(33);
+  new DataView(hdlrBox.buffer).setUint32(0, 33, false);
+  hdlrBox.set([0x68, 0x64, 0x6c, 0x72], 4);
+  hdlrBox.set([0x6d, 0x64, 0x69, 0x72], 12);
+
+  const metaSize = 12 + hdlrBox.length + ilstBox.length;
+  const metaBox = new Uint8Array(metaSize);
+  new DataView(metaBox.buffer).setUint32(0, metaSize, false);
+  metaBox.set([0x6d, 0x65, 0x74, 0x61], 4);
+  metaBox.set(hdlrBox, 12);
+  metaBox.set(ilstBox, 12 + hdlrBox.length);
+
+  const udtaSize = 8 + metaBox.length;
+  const udtaBox = new Uint8Array(udtaSize);
+  new DataView(udtaBox.buffer).setUint32(0, udtaSize, false);
+  udtaBox.set([0x75, 0x64, 0x74, 0x61], 4);
+  udtaBox.set(metaBox, 8);
+
+  return udtaBox;
+}
+
+// Full 100% Lossless TikTok Quality Bypass Engine (JSIBRA Pro Method)
+function patchMp4JsibraEngine(buf: Uint8Array, commentText = "https://jsibra.me"): Uint8Array {
+  const ftyp = _ss_findBox(buf, 0, buf.length, "ftyp");
+  const moov = _ss_findBox(buf, 0, buf.length, "moov");
+  const mdat = _ss_findBox(buf, 0, buf.length, "mdat");
+
+  if (!ftyp || !moov || !mdat) {
+    throw new Error("Struktur MP4 tidak valid (ftyp, moov, atau mdat tidak ditemukan).");
+  }
+
+  const ftypBytes = buf.subarray(ftyp.offset, ftyp.end);
+  const origMdatPayload = buf.subarray(mdat.contentStart, mdat.end);
+  const origMdatContentStart = mdat.contentStart;
+
+  const traks = _ss_parseBoxes(buf, moov.contentStart, moov.end).filter((b) => b.type === "trak");
+  if (!traks.length) throw new Error("Tidak ada track video dalam file.");
+
+  const mvhd = _ss_findDeep(buf, moov.contentStart, moov.end, "mvhd");
+  if (!mvhd) throw new Error("Atom mvhd tidak ditemukan.");
+
+  const origMvhdVer = buf[mvhd.contentStart];
+  const origMvhdTimescale = _ss_readU32(buf, mvhd.contentStart + (origMvhdVer === 1 ? 20 : 12)) || 1000;
+  const targetMvhdTimescale = 48000;
+
+  function rescaleTkhd(tkhdBox: BoxInfo): Uint8Array {
+    const copy = new Uint8Array(tkhdBox.size);
+    copy.set(buf.subarray(tkhdBox.offset, tkhdBox.end));
+    const ver = copy[8];
+    const dv = new DataView(copy.buffer, copy.byteOffset, copy.byteLength);
+    if (ver === 1) {
+      const origDur = dv.getBigUint64(8 + 28, false);
+      const newDur = (origDur * BigInt(targetMvhdTimescale)) / BigInt(origMvhdTimescale);
+      dv.setBigUint64(8 + 28, newDur, false);
+    } else {
+      const origDur = dv.getUint32(8 + 20, false);
+      const newDur = Math.round((origDur * targetMvhdTimescale) / origMvhdTimescale);
+      dv.setUint32(8 + 20, newDur, false);
+    }
+    return copy;
+  }
+
+  function rescaleEdts(edtsBox: BoxInfo): Uint8Array {
+    const elstBox = _ss_findDeep(buf, edtsBox.contentStart, edtsBox.end, "elst");
+    if (!elstBox) return buf.subarray(edtsBox.offset, edtsBox.end);
+    const elstCopy = new Uint8Array(elstBox.size - elstBox.headerSize);
+    elstCopy.set(buf.subarray(elstBox.contentStart, elstBox.end));
+    const elstDv = new DataView(elstCopy.buffer, elstCopy.byteOffset, elstCopy.byteLength);
+    const ver = elstCopy[0];
+    const count = elstDv.getUint32(4, false);
+    for (let i = 0; i < count; i++) {
+      const base = 8 + i * (ver === 1 ? 20 : 12);
+      if (ver === 1) {
+        const segDur = elstDv.getBigUint64(base, false);
+        const newSegDur = (segDur * BigInt(targetMvhdTimescale)) / BigInt(origMvhdTimescale);
+        elstDv.setBigUint64(base, newSegDur, false);
+      } else {
+        const segDur = elstDv.getUint32(base, false);
+        const newSegDur = Math.round((segDur * targetMvhdTimescale) / origMvhdTimescale);
+        elstDv.setUint32(base, newSegDur, false);
+      }
+    }
+    return _ss_makeBox("edts", _ss_makeBox("elst", elstCopy));
+  }
+
+  // 1. mvhd Version 1 (64-bit) Infinite Duration Sentinel
+  const newMvhdPayload = new Uint8Array(112);
+  const mvhdDv = new DataView(newMvhdPayload.buffer);
+  newMvhdPayload[0] = 1;
+  mvhdDv.setUint32(20, targetMvhdTimescale, false);
+  mvhdDv.setBigUint64(24, BigInt("0xFFFFFFFFFFFFFFFF"), false);
+  mvhdDv.setUint32(32, 0x00010000, false);
+  mvhdDv.setUint16(36, 0x0100, false);
+  mvhdDv.setUint32(48, 0x00010000, false);
+  mvhdDv.setUint32(64, 0x00010000, false);
+  mvhdDv.setUint32(80, 0x40000000, false);
+  mvhdDv.setUint32(108, 4, false);
+  const newMvhdBox = _ss_makeBox("mvhd", newMvhdPayload);
+
+  // 2. Video Track (Track 1)
+  const videoTrak = traks[0];
+  const audioTrak = traks.length > 1 ? traks[1] : null;
+
+  const vSttsBox = _ss_findDeep(buf, videoTrak.contentStart, videoTrak.end, "stts");
+  const vStscBox = _ss_findDeep(buf, videoTrak.contentStart, videoTrak.end, "stsc");
+  const vStszBox = _ss_findDeep(buf, videoTrak.contentStart, videoTrak.end, "stsz");
+  const vStcoBox = _ss_findDeep(buf, videoTrak.contentStart, videoTrak.end, "stco") || _ss_findDeep(buf, videoTrak.contentStart, videoTrak.end, "co64");
+  const vCttsBox = _ss_findDeep(buf, videoTrak.contentStart, videoTrak.end, "ctts");
+
+  if (!vSttsBox || !vStscBox || !vStszBox || !vStcoBox) {
+    throw new Error("Atom video stbl (stts/stsc/stsz/stco) tidak ditemukan.");
+  }
+
+  const vChunkCount = _ss_readU32(buf, vStcoBox.contentStart + 4);
+  const vRelOffsets: number[] = [];
+  for (let i = 0; i < vChunkCount; i++) {
+    const off = _ss_readU32(buf, vStcoBox.contentStart + 8 + i * 4);
+    vRelOffsets.push(off - origMdatContentStart);
+  }
+
+  let aStcoBox: BoxInfo | null = null;
+  let aStsdBox: BoxInfo | null = null;
+  let aChunkCount = 0;
+  const aRelOffsets: number[] = [];
+  if (audioTrak) {
+    aStsdBox = _ss_findDeep(buf, audioTrak.contentStart, audioTrak.end, "stsd");
+    aStcoBox = _ss_findDeep(buf, audioTrak.contentStart, audioTrak.end, "stco") || _ss_findDeep(buf, audioTrak.contentStart, audioTrak.end, "co64");
+    if (aStcoBox) {
+      aChunkCount = _ss_readU32(buf, aStcoBox.contentStart + 4);
+      for (let i = 0; i < aChunkCount; i++) {
+        const off = _ss_readU32(buf, aStcoBox.contentStart + 8 + i * 4);
+        aRelOffsets.push(off - origMdatContentStart);
+      }
+    }
+  }
+
+  // 8 bytes dummy sample in mdat + 16 bytes dummy sample in Track 3 = 24 bytes overhead
+  const inMdatAnchor = new Uint8Array([0x00, 0x00, 0x00, 0x08, 0x66, 0x72, 0x65, 0x65]);
+  const outMdatTrap = new Uint8Array([
+    0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x08, 0x66, 0x72, 0x65, 0x65,
+  ]);
+
+  // Video STTS (+1 zero-delta sample)
+  const origVSttsEntries = _ss_readU32(buf, vSttsBox.contentStart + 4);
+  const newVSttsPayload = new Uint8Array(8 + (origVSttsEntries + 1) * 8);
+  const vSttsDv = new DataView(newVSttsPayload.buffer);
+  vSttsDv.setUint32(4, origVSttsEntries + 1, false);
+  newVSttsPayload.set(buf.subarray(vSttsBox.contentStart + 8, vSttsBox.contentStart + 8 + origVSttsEntries * 8), 8);
+  vSttsDv.setUint32(8 + origVSttsEntries * 8, 1, false);
+  vSttsDv.setUint32(8 + origVSttsEntries * 8 + 4, 0, false);
+  const newVSttsBox = _ss_makeBox("stts", newVSttsPayload);
+
+  // Video STSZ (+1 sample of size 8)
+  const origVSampleSize = _ss_readU32(buf, vStszBox.contentStart + 4);
+  const origVSampleCount = _ss_readU32(buf, vStszBox.contentStart + 8);
+  const newVStszPayload = new Uint8Array(12 + (origVSampleCount + 1) * 4);
+  const vStszDv = new DataView(newVStszPayload.buffer);
+  vStszDv.setUint32(4, 0, false);
+  vStszDv.setUint32(8, origVSampleCount + 1, false);
+  if (origVSampleSize === 0) {
+    newVStszPayload.set(buf.subarray(vStszBox.contentStart + 12, vStszBox.contentStart + 12 + origVSampleCount * 4), 12);
+  } else {
+    for (let i = 0; i < origVSampleCount; i++) vStszDv.setUint32(12 + i * 4, origVSampleSize, false);
+  }
+  vStszDv.setUint32(12 + origVSampleCount * 4, 8, false);
+  const newVStszBox = _ss_makeBox("stsz", newVStszPayload);
+
+  // Video CTTS
+  let newVCttsBox: Uint8Array | null = null;
+  if (vCttsBox) {
+    const origCttsEntries = _ss_readU32(buf, vCttsBox.contentStart + 4);
+    const newCttsPayload = new Uint8Array(8 + (origCttsEntries + 1) * 8);
+    const cttsDv = new DataView(newCttsPayload.buffer);
+    newCttsPayload[0] = buf[vCttsBox.contentStart];
+    cttsDv.setUint32(4, origCttsEntries + 1, false);
+    newCttsPayload.set(buf.subarray(vCttsBox.contentStart + 8, vCttsBox.contentStart + 8 + origCttsEntries * 8), 8);
+    cttsDv.setUint32(8 + origCttsEntries * 8, 1, false);
+    cttsDv.setUint32(8 + origCttsEntries * 8 + 4, 0, false);
+    newVCttsBox = _ss_makeBox("ctts", newCttsPayload);
+  } else {
+    const newCttsPayload = new Uint8Array(8 + 2 * 8);
+    const cttsDv = new DataView(newCttsPayload.buffer);
+    newCttsPayload[0] = 0;
+    cttsDv.setUint32(4, 2, false);
+    cttsDv.setUint32(8, origVSampleCount, false);
+    cttsDv.setUint32(12, 0, false);
+    cttsDv.setUint32(16, 1, false);
+    cttsDv.setUint32(20, 0, false);
+    newVCttsBox = _ss_makeBox("ctts", newCttsPayload);
+  }
+
+  // Video STSC (+1 chunk)
+  const origVStscEntries = _ss_readU32(buf, vStscBox.contentStart + 4);
+  const newVStscPayload = new Uint8Array(8 + (origVStscEntries + 1) * 12);
+  const vStscDv = new DataView(newVStscPayload.buffer);
+  vStscDv.setUint32(4, origVStscEntries + 1, false);
+  newVStscPayload.set(buf.subarray(vStscBox.contentStart + 8, vStscBox.contentStart + 8 + origVStscEntries * 12), 8);
+  vStscDv.setUint32(8 + origVStscEntries * 12, vChunkCount + 1, false);
+  vStscDv.setUint32(8 + origVStscEntries * 12 + 4, 1, false);
+  vStscDv.setUint32(8 + origVStscEntries * 12 + 8, 1, false);
+  const newVStscBox = _ss_makeBox("stsc", newVStscPayload);
+
+  // Track 3 (Micro-Shield Auxiliary Audio Track)
+  const t3TkhdPayload = new Uint8Array(84);
+  const t3TkhdDv = new DataView(t3TkhdPayload.buffer);
+  t3TkhdDv.setUint32(0, 0x00000007, false);
+  t3TkhdDv.setUint32(12, 3, false);
+  t3TkhdDv.setUint32(20, 48000, false);
+  t3TkhdDv.setUint16(36, 0x0100, false);
+  t3TkhdDv.setUint32(40, 0x00010000, false);
+  t3TkhdDv.setUint32(56, 0x00010000, false);
+  t3TkhdDv.setUint32(72, 0x40000000, false);
+  const t3Tkhd = _ss_makeBox("tkhd", t3TkhdPayload);
+
+  const t3MdhdPayload = new Uint8Array(24);
+  const t3MdhdDv = new DataView(t3MdhdPayload.buffer);
+  t3MdhdDv.setUint32(12, 48000, false);
+  t3MdhdDv.setUint32(16, 48000, false);
+  const t3Mdhd = _ss_makeBox("mdhd", t3MdhdPayload);
+
+  const t3HdlrPayload = new Uint8Array(25);
+  t3HdlrPayload.set([0x73, 0x6f, 0x75, 0x6e], 8);
+  const nameStr = "SoundHandler";
+  for (let i = 0; i < nameStr.length; i++) t3HdlrPayload[12 + i] = nameStr.charCodeAt(i);
+  const t3Hdlr = _ss_makeBox("hdlr", t3HdlrPayload);
+
+  let t3Stsd: Uint8Array | null = null;
+  if (aStsdBox) {
+    t3Stsd = buf.subarray(aStsdBox.offset, aStsdBox.end);
+  } else {
+    const dummyStsd = new Uint8Array(28);
+    const dDv = new DataView(dummyStsd.buffer);
+    dDv.setUint32(4, 1, false);
+    dDv.setUint32(8, 20, false);
+    dummyStsd.set([0x6d, 0x70, 0x34, 0x61], 12);
+    t3Stsd = _ss_makeBox("stsd", dummyStsd);
+  }
+
+  const t3SttsPayload = new Uint8Array(16);
+  const t3SttsDv = new DataView(t3SttsPayload.buffer);
+  t3SttsDv.setUint32(4, 1, false);
+  t3SttsDv.setUint32(8, 1, false);
+  t3SttsDv.setUint32(12, 1024, false);
+  const t3Stts = _ss_makeBox("stts", t3SttsPayload);
+
+  const t3StszPayload = new Uint8Array(12);
+  const t3StszDv = new DataView(t3StszPayload.buffer);
+  t3StszDv.setUint32(4, 8, false);
+  t3StszDv.setUint32(8, 1, false);
+  const t3Stsz = _ss_makeBox("stsz", t3StszPayload);
+
+  const t3StscPayload = new Uint8Array(20);
+  const t3StscDv = new DataView(t3StscPayload.buffer);
+  t3StscDv.setUint32(4, 1, false);
+  t3StscDv.setUint32(8, 1, false);
+  t3StscDv.setUint32(12, 1, false);
+  t3StscDv.setUint32(16, 1, false);
+  const t3Stsc = _ss_makeBox("stsc", t3StscPayload);
+
+  const t3Smhd = _ss_makeBox("smhd", new Uint8Array(8));
+  const drefEntry = new Uint8Array([0x00, 0x00, 0x00, 0x0c, 0x75, 0x72, 0x6c, 0x20, 0x00, 0x00, 0x00, 0x01]);
+  const drefPayload = new Uint8Array(8 + drefEntry.length);
+  new DataView(drefPayload.buffer).setUint32(4, 1, false);
+  drefPayload.set(drefEntry, 8);
+  const t3Dref = _ss_makeBox("dref", drefPayload);
+  const t3Dinf = _ss_makeBox("dinf", t3Dref);
+
+  const vStblBox = _ss_findDeep(buf, videoTrak.contentStart, videoTrak.end, "stbl");
+  if (!vStblBox) throw new Error("stbl tidak ditemukan");
+  const vStblChildren = _ss_parseBoxes(buf, vStblBox.contentStart, vStblBox.end);
+
+  const vMinfBox = _ss_findDeep(buf, videoTrak.contentStart, videoTrak.end, "minf");
+  if (!vMinfBox) throw new Error("minf tidak ditemukan");
+  const vMinfChildren = _ss_parseBoxes(buf, vMinfBox.contentStart, vMinfBox.end);
+
+  const vMdiaBox = _ss_findDeep(buf, videoTrak.contentStart, videoTrak.end, "mdia");
+  if (!vMdiaBox) throw new Error("mdia tidak ditemukan");
+  const vMdiaChildren = _ss_parseBoxes(buf, vMdiaBox.contentStart, vMdiaBox.end);
+  const vTrakChildren = _ss_parseBoxes(buf, videoTrak.contentStart, videoTrak.end);
+
+  const udtaBox = makeCommentUdta(commentText);
+
+  let moovBytes: Uint8Array | null = null;
+  let finalOutput: Uint8Array | null = null;
+
+  for (let iter = 0; iter < 3; iter++) {
+    const estMoovLen = moovBytes ? moovBytes.length : moov.size + udtaBox.length + 1024;
+    const newMdatContentStart = ftypBytes.length + estMoovLen + 8;
+    const anchorChunkOffset = newMdatContentStart + origMdatPayload.length;
+    const outMdatChunkOffset = anchorChunkOffset + inMdatAnchor.length;
+
+    const newVStcoPayload = new Uint8Array(8 + (vChunkCount + 1) * 4);
+    const vStcoDv = new DataView(newVStcoPayload.buffer);
+    vStcoDv.setUint32(4, vChunkCount + 1, false);
+    for (let i = 0; i < vChunkCount; i++) {
+      vStcoDv.setUint32(8 + i * 4, vRelOffsets[i] + newMdatContentStart, false);
+    }
+    vStcoDv.setUint32(8 + vChunkCount * 4, anchorChunkOffset, false);
+    const newVStcoBox = _ss_makeBox("stco", newVStcoPayload);
+
+    const vStblParts: Uint8Array[] = [];
+    for (const child of vStblChildren) {
+      if (child.type === "stts") {
+        vStblParts.push(newVSttsBox);
+        if (!vCttsBox && newVCttsBox) vStblParts.push(newVCttsBox);
+      } else if (child.type === "ctts" && newVCttsBox) {
+        vStblParts.push(newVCttsBox);
+      } else if (child.type === "stsc") vStblParts.push(newVStscBox);
+      else if (child.type === "stsz") vStblParts.push(newVStszBox);
+      else if (child.type === "stco" || child.type === "co64") vStblParts.push(newVStcoBox);
+      else vStblParts.push(buf.subarray(child.offset, child.end));
+    }
+    const newVStbl = _ss_makeBox("stbl", concatArrays(vStblParts));
+
+    const vMinfParts: Uint8Array[] = [];
+    for (const child of vMinfChildren) {
+      if (child.type === "stbl") vMinfParts.push(newVStbl);
+      else vMinfParts.push(buf.subarray(child.offset, child.end));
+    }
+    const newVMinf = _ss_makeBox("minf", concatArrays(vMinfParts));
+
+    const vMdiaParts: Uint8Array[] = [];
+    for (const child of vMdiaChildren) {
+      if (child.type === "minf") vMdiaParts.push(newVMinf);
+      else vMdiaParts.push(buf.subarray(child.offset, child.end));
+    }
+    const newVMdia = _ss_makeBox("mdia", concatArrays(vMdiaParts));
+
+    const vTrakParts: Uint8Array[] = [];
+    for (const child of vTrakChildren) {
+      if (child.type === "tkhd") vTrakParts.push(rescaleTkhd(child));
+      else if (child.type === "edts") vTrakParts.push(rescaleEdts(child));
+      else if (child.type === "mdia") vTrakParts.push(newVMdia);
+      else vTrakParts.push(buf.subarray(child.offset, child.end));
+    }
+    const newVTrak = _ss_makeBox("trak", concatArrays(vTrakParts));
+
+    let newATrak: Uint8Array | null = null;
+    if (audioTrak && aStcoBox) {
+      const newAStcoPayload = new Uint8Array(8 + aChunkCount * 4);
+      const aStcoDv = new DataView(newAStcoPayload.buffer);
+      aStcoDv.setUint32(4, aChunkCount, false);
+      for (let i = 0; i < aChunkCount; i++) {
+        aStcoDv.setUint32(8 + i * 4, aRelOffsets[i] + newMdatContentStart, false);
+      }
+      const newAStcoBox = _ss_makeBox("stco", newAStcoPayload);
+
+      const aStblBox = _ss_findDeep(buf, audioTrak.contentStart, audioTrak.end, "stbl");
+      if (aStblBox) {
+        const aStblChildren = _ss_parseBoxes(buf, aStblBox.contentStart, aStblBox.end);
+        const aStblParts: Uint8Array[] = [];
+        for (const child of aStblChildren) {
+          if (child.type === "stco" || child.type === "co64") aStblParts.push(newAStcoBox);
+          else aStblParts.push(buf.subarray(child.offset, child.end));
+        }
+        const newAStbl = _ss_makeBox("stbl", concatArrays(aStblParts));
+
+        const aMinfBox = _ss_findDeep(buf, audioTrak.contentStart, audioTrak.end, "minf");
+        if (aMinfBox) {
+          const aMinfChildren = _ss_parseBoxes(buf, aMinfBox.contentStart, aMinfBox.end);
+          const aMinfParts: Uint8Array[] = [];
+          for (const child of aMinfChildren) {
+            if (child.type === "stbl") aMinfParts.push(newAStbl);
+            else aMinfParts.push(buf.subarray(child.offset, child.end));
+          }
+          const newAMinf = _ss_makeBox("minf", concatArrays(aMinfParts));
+
+          const aMdiaBox = _ss_findDeep(buf, audioTrak.contentStart, audioTrak.end, "mdia");
+          if (aMdiaBox) {
+            const aMdiaChildren = _ss_parseBoxes(buf, aMdiaBox.contentStart, aMdiaBox.end);
+            const aMdiaParts: Uint8Array[] = [];
+            for (const child of aMdiaChildren) {
+              if (child.type === "minf") aMdiaParts.push(newAMinf);
+              else aMdiaParts.push(buf.subarray(child.offset, child.end));
+            }
+            const newAMdia = _ss_makeBox("mdia", concatArrays(aMdiaParts));
+
+            const aTrakChildren = _ss_parseBoxes(buf, audioTrak.contentStart, audioTrak.end);
+            const aTrakParts: Uint8Array[] = [];
+            for (const child of aTrakChildren) {
+              if (child.type === "tkhd") aTrakParts.push(rescaleTkhd(child));
+              else if (child.type === "edts") aTrakParts.push(rescaleEdts(child));
+              else if (child.type === "mdia") aTrakParts.push(newAMdia);
+              else aTrakParts.push(buf.subarray(child.offset, child.end));
+            }
+            newATrak = _ss_makeBox("trak", concatArrays(aTrakParts));
+          }
+        }
+      }
+    }
+
+    // Track 3 Assembly
+    const t3StcoPayload = new Uint8Array(12);
+    const t3StcoDv = new DataView(t3StcoPayload.buffer);
+    t3StcoDv.setUint32(4, 1, false);
+    t3StcoDv.setUint32(8, outMdatChunkOffset, false);
+    const t3Stco = _ss_makeBox("stco", t3StcoPayload);
+
+    const t3Stbl = _ss_makeBox("stbl", concatArrays([t3Stsd!, t3Stts, t3Stsz, t3Stsc, t3Stco]));
+    const t3Minf = _ss_makeBox("minf", concatArrays([t3Smhd, t3Dinf, t3Stbl]));
+    const t3Mdia = _ss_makeBox("mdia", concatArrays([t3Mdhd, t3Hdlr, t3Minf]));
+    const t3Trak = _ss_makeBox("trak", concatArrays([t3Tkhd, t3Mdia]));
+
+    const traksList = [newVTrak];
+    if (newATrak) traksList.push(newATrak);
+    traksList.push(t3Trak);
+
+    moovBytes = _ss_makeBox("moov", concatArrays([newMvhdBox, ...traksList, udtaBox]));
+
+    if (iter === 2) {
+      const newMdatPayload = concatArrays([origMdatPayload, inMdatAnchor]);
+      const newMdatBox = _ss_makeBox("mdat", newMdatPayload);
+      finalOutput = concatArrays([ftypBytes, moovBytes, newMdatBox, outMdatTrap]);
+    }
+  }
+
+  if (!finalOutput) throw new Error("Gagal mengompilasi struktur output MP4.");
+  return finalOutput;
+}
 
 export default function HqOptimizerPage() {
   const [file, setFile] = useState<File | null>(null);
-  const [method, setMethod] = useState<"PASSTHROUGH" | "COMPACT_1080">("PASSTHROUGH");
+  const [method, setMethod] = useState<"JSIBRA_STEALTH" | "PASSTHROUGH">("JSIBRA_STEALTH");
   const [compressLevel, setCompressLevel] = useState<"OFF" | "1080P" | "720P">("OFF");
   const [isProcessing, setIsProcessing] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [processedBlob, setProcessedBlob] = useState<Blob | null>(null);
   const [processedFileName, setProcessedFileName] = useState("");
-  const [overheadBytes, setOverheadBytes] = useState<number>(24);
   const [isDragOver, setIsDragOver] = useState(false);
   const [isCopied, setIsCopied] = useState(false);
 
@@ -51,7 +593,7 @@ export default function HqOptimizerPage() {
     setLogs([
       `File dipilih: ${selectedFile.name} (${(selectedFile.size / (1024 * 1024)).toFixed(2)} MB)`,
       `Format terdeteksi: ${selectedFile.type || "video/mp4"}`,
-      `Siap untuk proses optimasi HQ Bypass.`
+      `Siap untuk proses optimasi JSIBRA HQ Bypass.`,
     ]);
   };
 
@@ -64,151 +606,46 @@ export default function HqOptimizerPage() {
 
     const originalSizeMB = (file.size / (1024 * 1024)).toFixed(2);
     addLog("=================================================");
-    addLog(`= TikTok HQ Ingest Optimizer — JSIBRA Pro =`);
+    addLog(`= TikTok HQ Ingest Optimizer — JSIBRA Pro Engine =`);
     addLog(`  File      : ${file.name} (${originalSizeMB} MB)`);
-    addLog(`  Method    : ${method === "PASSTHROUGH" ? "JSIBRA STEALTH PASS-THROUGH (Direct Atom)" : "COMPACT 1080P"}`);
+    addLog(`  Method    : JSIBRA STEALTH PRO (Dual-Trap + 48k Clock Sentinel)`);
     addLog(`  Compress  : ${compressLevel}`);
     addLog("=================================================");
 
-    await new Promise((r) => setTimeout(r, 200));
+    await new Promise((r) => setTimeout(r, 150));
 
     try {
-      addLog("= Clip Normalization — Faststart Remux =");
-      addLog("  Menganalisis struktur atom biner MP4 (ISO BMFF)...");
+      addLog("= Clip Normalization — Faststart Inspection =");
+      addLog("  Membaca struktur MP4 container ke browser memory...");
 
       const fileBuffer = await file.arrayBuffer();
-      const view = new DataView(fileBuffer);
+      const rawBytes = new Uint8Array(fileBuffer);
 
-      let offset = 0;
-      let ftypBox: { start: number; length: number } | null = null;
-      let moovBox: { start: number; length: number } | null = null;
-      let mdatBox: { start: number; length: number } | null = null;
-      const otherBoxes: { start: number; length: number; type: string }[] = [];
+      addLog("  Standardizing MP4 streams (Verifikasi atom ftyp & moov)...");
+      await new Promise((r) => setTimeout(r, 200));
 
-      while (offset < fileBuffer.byteLength - 8) {
-        let size = view.getUint32(offset);
-        const tag = String.fromCharCode(
-          view.getUint8(offset + 4),
-          view.getUint8(offset + 5),
-          view.getUint8(offset + 6),
-          view.getUint8(offset + 7)
-        );
+      addLog("=====");
+      addLog("= Applying JSIBRA STEALTH Method =");
+      addLog("  Injecting synchronized 48k infinite header & dual-trap anchor...");
+      addLog("  - Setting 64-bit Infinite Duration Sentinel (mvhd 48000 clock)");
+      addLog("  - Injecting Zero-Offset CTTS Table & In-Track Video Anchor");
+      addLog("  - Arming Micro-Shield Stream Trap on Track 3");
+      addLog("  - Embedding original signature: https://jsibra.me into udta metadata");
 
-        let boxLength = size;
-        if (size === 1) {
-          const high = view.getUint32(offset + 8);
-          const low = view.getUint32(offset + 12);
-          boxLength = high * 4294967296 + low;
-        } else if (size === 0) {
-          boxLength = fileBuffer.byteLength - offset;
-        }
+      await new Promise((r) => setTimeout(r, 250));
 
-        if (boxLength <= 0 || offset + boxLength > fileBuffer.byteLength) {
-          boxLength = fileBuffer.byteLength - offset;
-        }
+      // Run full binary patch engine
+      const patchedBytes = patchMp4JsibraEngine(rawBytes, "https://jsibra.me");
 
-        if (tag === "ftyp" && !ftypBox) {
-          ftypBox = { start: offset, length: boxLength };
-        } else if (tag === "moov" && !moovBox) {
-          moovBox = { start: offset, length: boxLength };
-        } else if (tag === "mdat" && !mdatBox) {
-          mdatBox = { start: offset, length: boxLength };
-        } else {
-          otherBoxes.push({ start: offset, length: boxLength, type: tag });
-        }
-
-        offset += boxLength;
-      }
-
-      addLog(`  Ditemukan: ftyp (${ftypBox?.length || 0}B), mdat (${((mdatBox?.length || 0) / (1024 * 1024)).toFixed(1)}MB), moov (${moovBox?.length || 0}B)`);
-
-      // Anchor payload: 24 bytes box with jsibra.me anchor tag
-      const anchorSize = 24;
-      const anchorBuffer = new Uint8Array(anchorSize);
-      const anchorView = new DataView(anchorBuffer.buffer);
-      anchorView.setUint32(0, anchorSize); // size
-      anchorBuffer[4] = 0x75; // 'u'
-      anchorBuffer[5] = 0x64; // 'd'
-      anchorBuffer[6] = 0x74; // 't'
-      anchorBuffer[7] = 0x61; // 'a' (udta box)
-
-      // Payload text: "jsibra.me/tiktok" (16 bytes)
-      const anchorText = "jsibra.me/tiktok";
-      for (let i = 0; i < 16; i++) {
-        anchorBuffer[8 + i] = i < anchorText.length ? anchorText.charCodeAt(i) : 0x00;
-      }
-
-      addLog("= Ingest Header Injection =");
-      addLog("  Menyuntikkan synchronized 48k timescale header & dual-trap anchor...");
-
-      let outputBlob: Blob;
-
-      if (moovBox && mdatBox && moovBox.start > mdatBox.start) {
-        addLog("  [Faststart Action] Memindahkan atom 'moov' dari belakang ke posisi depan...");
-        
-        // Moov is located after mdat -> needs Faststart relocation
-        // Need to shift chunk offsets (stco and co64) inside moov by (moovBox.length + anchorSize)
-        const shiftAmount = moovBox.length + anchorSize;
-        const moovRaw = new Uint8Array(fileBuffer.slice(moovBox.start, moovBox.start + moovBox.length));
-        const moovDataView = new DataView(moovRaw.buffer);
-
-        // Adjust moov box length to include anchor
-        moovDataView.setUint32(0, moovBox.length + anchorSize);
-
-        // Scan and update stco (32-bit chunk offset) and co64 (64-bit)
-        let moovIdx = 0;
-        while (moovIdx < moovRaw.length - 8) {
-          const subSize = moovDataView.getUint32(moovIdx);
-          const subTag = String.fromCharCode(
-            moovRaw[moovIdx + 4],
-            moovRaw[moovIdx + 5],
-            moovRaw[moovIdx + 6],
-            moovRaw[moovIdx + 7]
-          );
-
-          if (subTag === "stco") {
-            const entryCount = moovDataView.getUint32(moovIdx + 12);
-            for (let i = 0; i < entryCount; i++) {
-              const currentOffset = moovDataView.getUint32(moovIdx + 16 + i * 4);
-              moovDataView.setUint32(moovIdx + 16 + i * 4, currentOffset + shiftAmount);
-            }
-          } else if (subTag === "co64") {
-            const entryCount = moovDataView.getUint32(moovIdx + 12);
-            for (let i = 0; i < entryCount; i++) {
-              const high = moovDataView.getUint32(moovIdx + 16 + i * 8);
-              const low = moovDataView.getUint32(moovIdx + 20 + i * 8);
-              let val = BigInt(high) * BigInt(4294967296) + BigInt(low);
-              val += BigInt(shiftAmount);
-              const b4g = BigInt(4294967296);
-              moovDataView.setUint32(moovIdx + 16 + i * 8, Number(val / b4g));
-              moovDataView.setUint32(moovIdx + 20 + i * 8, Number(val % b4g));
-            }
-          }
-          moovIdx += 1;
-        }
-
-        // Composite faststart blob: ftyp + moov (with anchor appended inside) + mdat + other boxes
-        const ftypPart = ftypBox ? fileBuffer.slice(ftypBox.start, ftypBox.start + ftypBox.length) : new Uint8Array();
-        const mdatPart = fileBuffer.slice(mdatBox.start, mdatBox.start + mdatBox.length);
-
-        outputBlob = new Blob([ftypPart, moovRaw, anchorBuffer, mdatPart], { type: "video/mp4" });
-      } else {
-        addLog("  [Faststart Status] File sudah berformat faststart. Menyuntikkan anchor metadata langsung...");
-        // File already has moov first, or unparsed: inject anchor at beginning of moov or trailer
-        outputBlob = new Blob([fileBuffer, anchorBuffer], { type: "video/mp4" });
-      }
-
-      await new Promise((r) => setTimeout(r, 300));
-
-      const finalSize = outputBlob.size;
-      setOverheadBytes(anchorSize);
-      addLog(`JSIBRA patch applied (+${anchorSize} bytes overhead). Total size: ${finalSize} bytes.`);
-      addLog("  Metode Direct Pass-Through sukses diterapkan!");
-      addLog(`Proses Selesai Sempurna! Output siap diunduh.`);
+      const overhead = patchedBytes.length - rawBytes.length;
+      addLog(`JSIBRA patch applied (+${overhead} bytes overhead). Total size: ${patchedBytes.length} bytes.`);
+      addLog("  JSIBRA Stealth method successfully applied!");
+      addLog("Process Completed Successfully! Output: done_hd.mp4");
 
       const originalBaseName = file.name.replace(/\.[^/.]+$/, "");
-      const finalName = `${originalBaseName}_hq.mp4`;
+      const finalName = `${originalBaseName}_hd.mp4`;
 
+      const outputBlob = new Blob([patchedBytes.buffer as ArrayBuffer], { type: "video/mp4" });
       setProcessedBlob(outputBlob);
       setProcessedFileName(finalName);
     } catch (err: any) {
@@ -256,7 +693,7 @@ export default function HqOptimizerPage() {
 
           <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-[#ffb066]/10 border border-[#ffb066]/25 text-[#ffb066] text-xs font-mono">
             <span className="w-2 h-2 rounded-full bg-[#ffb066] animate-pulse" />
-            <span>DIRECT PASS-THROUGH READY</span>
+            <span>JSIBRA STEALTH PRO READY</span>
           </div>
         </div>
       </header>
@@ -273,7 +710,7 @@ export default function HqOptimizerPage() {
             Bypass Kompresi <span className="text-transparent bg-clip-text bg-gradient-to-r from-[#ffb066] via-[#ffd09e] to-[#ff9944]">TikTok Studio HQ</span>
           </h1>
           <p className="text-[#c9b49d] text-sm md:text-base leading-relaxed max-w-3xl">
-            Optimasi container MP4 dengan Faststart remux dan injeksi anchor metadata orisinal. Mematikan fitur paksa Cloud Canvas TikTok Studio agar video 1080p dan 120 FPS dipertahankan murni tanpa penurunan ke 720p.
+            Optimasi container MP4 dengan sentinel 48k timescale infinite duration, zero-offset CTTS, dan dual-trap stream anchor. Mengunci kualitas 1080p dan 120 FPS tanpa penurunan bitrate atau resolusi paksa ke 720p.
           </p>
         </div>
 
@@ -377,9 +814,9 @@ export default function HqOptimizerPage() {
               <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
-                  onClick={() => setMethod("PASSTHROUGH")}
+                  onClick={() => setMethod("JSIBRA_STEALTH")}
                   className={`py-2 px-3 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
-                    method === "PASSTHROUGH"
+                    method === "JSIBRA_STEALTH"
                       ? "bg-[#ffb066] text-[#25150a] shadow-md font-bold"
                       : "bg-[#241a12] text-[#c9b49d] hover:text-[#fff1e0]"
                   }`}
@@ -388,14 +825,14 @@ export default function HqOptimizerPage() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setMethod("COMPACT_1080")}
+                  onClick={() => setMethod("PASSTHROUGH")}
                   className={`py-2 px-3 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
-                    method === "COMPACT_1080"
+                    method === "PASSTHROUGH"
                       ? "bg-[#ffb066] text-[#25150a] shadow-md font-bold"
                       : "bg-[#241a12] text-[#c9b49d] hover:text-[#fff1e0]"
                   }`}
                 >
-                  Standard Pass
+                  Faststart Direct
                 </button>
               </div>
             </div>
@@ -433,12 +870,12 @@ export default function HqOptimizerPage() {
             <div className="flex items-center gap-2">
               <span className="text-[#9e8870]">Mode:</span>
               <span className="font-semibold text-[#ffb066]">
-                Direct Pass-Through (Faststart + Ingest Anchor)
+                JSIBRA Stealth Pro (Dual-Trap + 48k Sentinel)
               </span>
             </div>
             <div className="flex items-center gap-2">
-              <span className="text-[#9e8870]">Overhead:</span>
-              <span className="font-mono text-[#70c99a] font-semibold">+24 bytes</span>
+              <span className="text-[#9e8870]">Signature:</span>
+              <span className="font-mono text-[#70c99a] font-semibold">https://jsibra.me</span>
             </div>
           </div>
 
@@ -456,7 +893,7 @@ export default function HqOptimizerPage() {
             {isProcessing ? (
               <>
                 <RefreshCw className="w-5 h-5 animate-spin" />
-                <span>Memproses Faststart & Anchor...</span>
+                <span>Menyuntikkan Dual-Trap Anchor...</span>
               </>
             ) : (
               <>
@@ -520,21 +957,21 @@ export default function HqOptimizerPage() {
         <div className="bg-[#1c140e]/70 border border-[rgba(255,205,150,0.12)] rounded-3xl p-6 md:p-8 space-y-4">
           <h2 className="text-lg font-bold text-[#fff1e0] flex items-center gap-2">
             <Sparkles className="w-4 h-4 text-[#ffb066]" />
-            <span>Bagaimana Cara Kerja Bypass Ini?</span>
+            <span>Bagaimana Cara Kerja JSIBRA Stealth Bypass?</span>
           </h2>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs text-[#c9b49d] leading-relaxed">
             <div className="space-y-2 bg-[#130b06]/60 p-4 rounded-2xl border border-[rgba(255,205,150,0.08)]">
-              <h3 className="font-bold text-[#ffb066] text-sm">1. Faststart Remux (Direct Pass-Through)</h3>
+              <h3 className="font-bold text-[#ffb066] text-sm">1. 64-bit Infinite Duration Sentinel (48k Clock)</h3>
               <p>
-                Encoder video (Premiere/DaVinci) biasanya menaruh indeks <code>moov</code> di ujung akhir file. Tool ini memindahkan atom <code>moov</code> ke posisi awal tanpa meng-encode ulang piksel gambar, sehingga server ingest TikTok langsung membaca seluruh struktur video saat detik pertama diupload.
+                Atom <code>mvhd</code> dimodifikasi menjadi Version 1 (64-bit) dengan durasi tak terhingga (<code>0xFFFFFFFFFFFFFFFF</code>) pada clock 48000 Hz. Cloud canvas editor TikTok tidak sanggup me-render stream berdurasi tak hingga sehingga otomatis membatalkan re-encoding dan beralih ke <strong>Direct Pass-Through</strong> murni.
               </p>
             </div>
 
             <div className="space-y-2 bg-[#130b06]/60 p-4 rounded-2xl border border-[rgba(255,205,150,0.08)]">
-              <h3 className="font-bold text-[#ffb066] text-sm">2. Payload Interceptor (Userscript)</h3>
+              <h3 className="font-bold text-[#ffb066] text-sm">2. Dual-Trap Stream Anchor (+24 Bytes)</h3>
               <p>
-                Saat mengunggah lewat TikTok Studio, script Tampermonkey membajak request API TikTok dan mematikan flag <code>cloud_edit_is_use_video_canvas</code>. Ini menghentikan server TikTok dari merender ulang video dan memaksanya mempertahankan resolusi 1080p 120 FPS.
+                Menyuntikkan 8 byte dummy sample di ujung <code>mdat</code> dan 16 byte trap di Track 3 audio auxiliary. Ditambah metadata signature <code>https://jsibra.me</code> di dalam atom <code>udta</code>, memastikan metode dikenali di seluruh analyser.
               </p>
             </div>
           </div>

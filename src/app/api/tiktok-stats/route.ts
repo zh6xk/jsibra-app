@@ -13,6 +13,21 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "URL TikTok wajib diisi." }, { status: 400 });
     }
 
+    // Resolve shortlink jika vt.tiktok.com atau vm.tiktok.com
+    if (url.includes("vt.tiktok.com") || url.includes("vm.tiktok.com")) {
+      try {
+        const headRes = await fetch(url, {
+          method: "HEAD",
+          redirect: "follow",
+          headers: {
+            "User-Agent":
+              "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+          },
+        });
+        if (headRes.url) url = headRes.url;
+      } catch (_) {}
+    }
+
     // Panggil TikWM API dengan format x-www-form-urlencoded
     const formData = new URLSearchParams();
     formData.append("url", url);
@@ -64,22 +79,32 @@ export async function POST(req: NextRequest) {
     const nowSeconds = Math.floor(Date.now() / 1000);
     const ageHours = (nowSeconds - createTimeUnix) / 3600;
 
-    // Diagnosa Shadowban / Status Distribusi
-    let shadowbanStatus: "RESTRICTED" | "REVIEW" | "NORMAL" = "NORMAL";
-    let shadowbanTitle = "Distribusi Normal (FYP Active)";
+    // Diagnosa Shadowban (Menggunakan flag internal ByteDance `is_nff_or_nr` & views)
+    const isDirectNff = !!d.is_nff_or_nr;
+    let isShadowbanned = false;
+    let shadowbanStatus: "RESTRICTED" | "SAFE" = "SAFE";
+    let shadowbanTitle = "Aman";
     let shadowbanBadgeColor = "border-emerald-500/40 text-emerald-400 bg-emerald-500/10";
-    let shadowbanReason = "Video terdistribusi secara publik di feed For You (FYP) dan tidak ada pembatasan sistem.";
+    let shadowbanReason = "Video terdistribusi normal di feed For You (FYP) dan tidak terkena pembatasan sistem.";
 
-    if (views <= 5 && ageHours > 1) {
+    if (isDirectNff) {
+      isShadowbanned = true;
       shadowbanStatus = "RESTRICTED";
-      shadowbanTitle = "Dibatasi / Shadowban (0-5 Views Freeze)";
+      shadowbanTitle = "Dibatasi";
       shadowbanBadgeColor = "border-rose-500/50 text-rose-400 bg-rose-500/15";
-      shadowbanReason = `Video terhenti di ${views} view meski sudah diunggah lebih dari ${Math.floor(ageHours)} jam lalu. Algoritma FYP membatasi distribusi awal akibat deteksi spam, metadata tidak standar, atau akun dalam status shadowban.`;
-    } else if (views <= 50 && ageHours <= 2) {
-      shadowbanStatus = "REVIEW";
-      shadowbanTitle = "Sedang Ditinjau (Initial Review)";
-      shadowbanBadgeColor = "border-amber-500/40 text-amber-400 bg-amber-500/10";
-      shadowbanReason = "Video baru saja diunggah dan sedang melewati batch kurasi algoritma awal TikTok.";
+      shadowbanReason = "TikTok secara eksplisit menandai video ini sebagai NFF/NR (Not For Feed / Not Recommended). Video dibatasi dari rekomendasi FYP dan hanya dapat diakses melalui profil.";
+    } else if (views <= 5 && ageHours > 4) {
+      isShadowbanned = true;
+      shadowbanStatus = "RESTRICTED";
+      shadowbanTitle = "Dibatasi (0-5 Views Freeze)";
+      shadowbanBadgeColor = "border-rose-500/50 text-rose-400 bg-rose-500/15";
+      shadowbanReason = `Video terhenti di ${views} view meski sudah diunggah lebih dari ${Math.floor(ageHours)} jam lalu. Distribusi terhambat oleh filter otomatis algoritma.`;
+    } else {
+      isShadowbanned = false;
+      shadowbanStatus = "SAFE";
+      shadowbanTitle = "Aman";
+      shadowbanBadgeColor = "border-emerald-500/40 text-emerald-400 bg-emerald-500/10";
+      shadowbanReason = "Tidak ada tanda pembatasan shadowban. Video beredar normal di For You Page.";
     }
 
     // Ingest & Stream Probe via ffprobe
@@ -89,11 +114,12 @@ export async function POST(req: NextRequest) {
     let videoCodec = "h264";
     let audioSampleRate = "44100";
     let isFaststart = true;
-    let ingestMethod = "Direct Web Pass-Through";
+    let ingestMethod = "Standard Web Studio";
+    let rawCommentTag = "";
 
     if (d.play) {
       try {
-        const ffprobeCmd = `ffprobe -v error -select_streams v:0 -show_entries stream=width,height,codec_name,r_frame_rate -of json "${d.play}"`;
+        const ffprobeCmd = `ffprobe -v error -select_streams v:0 -show_entries stream=width,height,codec_name,r_frame_rate -show_entries format_tags=comment -of json "${d.play}"`;
         const { stdout } = await execAsync(ffprobeCmd, { timeout: 8000 });
         const probeData = JSON.parse(stdout);
         const vStream = probeData.streams?.[0];
@@ -106,9 +132,10 @@ export async function POST(req: NextRequest) {
             if (num && den) fps = Math.round(num / den).toString();
           }
         }
-      } catch (err) {
-        // fallback to defaults if probe times out
-      }
+        if (probeData.format?.tags?.comment) {
+          rawCommentTag = probeData.format.tags.comment;
+        }
+      } catch (err) {}
 
       // Probe audio sample rate
       try {
@@ -119,23 +146,32 @@ export async function POST(req: NextRequest) {
         if (aStream?.sample_rate) audioSampleRate = aStream.sample_rate;
       } catch (_) {}
 
-      // Range probe untuk mendeteksi signature ingest
+      // Range probe atom MP4 untuk mendeteksi comment atau signature box
+      let headStr = "";
       try {
         const headRes = await fetch(d.play, {
-          headers: { Range: "bytes=0-16384" },
+          headers: { Range: "bytes=0-32768" },
         });
         const headBuf = await headRes.arrayBuffer();
         const headBytes = new Uint8Array(headBuf);
-        const headStr = String.fromCharCode(...headBytes);
-
-        if (headStr.includes("jsibra.me")) {
-          ingestMethod = "JSIBRA Stealth HQ Ingest";
-        } else if (headStr.includes("moov") && headStr.indexOf("moov") < 1024) {
-          ingestMethod = "Web Studio Faststart (Pass-Through)";
-        } else {
-          ingestMethod = "Mobile App / Cloud Canvas Transcode";
-        }
+        headStr = String.fromCharCode(...headBytes);
       } catch (_) {}
+
+      // Identifikasi metode upload
+      const allText = (rawCommentTag + " " + headStr).toLowerCase();
+      if (allText.includes("jsibra.me")) {
+        ingestMethod = "https://jsibra.me";
+      } else if (allText.includes("cutefish")) {
+        ingestMethod = "https://cutefish.my.id";
+      } else if (rawCommentTag && rawCommentTag.startsWith("http")) {
+        ingestMethod = rawCommentTag;
+      } else if (rawCommentTag && !rawCommentTag.startsWith("vid:")) {
+        ingestMethod = rawCommentTag;
+      } else if (headStr.includes("moov") && headStr.indexOf("moov") < 1024) {
+        ingestMethod = "Web Studio Faststart";
+      } else {
+        ingestMethod = "Mobile App Direct Ingest";
+      }
     }
 
     return NextResponse.json({
@@ -154,6 +190,8 @@ export async function POST(req: NextRequest) {
         },
         shadowban: {
           status: shadowbanStatus,
+          isShadowbanned,
+          isDirectNff,
           title: shadowbanTitle,
           badgeColor: shadowbanBadgeColor,
           reason: shadowbanReason,
@@ -170,6 +208,7 @@ export async function POST(req: NextRequest) {
           audioSampleRate: `${audioSampleRate} Hz`,
           ingestMethod,
           isFaststart,
+          commentTag: rawCommentTag,
           playUrl: d.play,
         },
         engagement: {

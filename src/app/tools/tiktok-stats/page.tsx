@@ -246,23 +246,34 @@ export default function TikTokStatsPage() {
 
             {/* Shadowban Status Banner */}
             <div
-              className={`p-6 rounded-3xl border shadow-lg space-y-2 ${
+              className={`p-6 rounded-3xl border shadow-lg space-y-3 ${
                 result.shadowban.status === "RESTRICTED"
-                  ? "bg-rose-950/20 border-rose-500/40 text-rose-300"
-                  : result.shadowban.status === "REVIEW"
-                  ? "bg-amber-950/20 border-amber-500/40 text-amber-300"
-                  : "bg-emerald-950/20 border-emerald-500/40 text-emerald-300"
+                  ? "bg-rose-950/25 border-rose-500/50 text-rose-300"
+                  : "bg-emerald-950/25 border-emerald-500/50 text-emerald-300"
               }`}
             >
-              <div className="flex items-center gap-2 text-base font-bold">
-                {result.shadowban.status === "RESTRICTED" ? (
-                  <AlertOctagon className="w-5 h-5 text-rose-400" />
-                ) : result.shadowban.status === "REVIEW" ? (
-                  <Clock className="w-5 h-5 text-amber-400" />
-                ) : (
-                  <CheckCircle2 className="w-5 h-5 text-emerald-400" />
-                )}
-                <span>Status Algoritma: {result.shadowban.title}</span>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5 text-base font-bold">
+                  {result.shadowban.status === "RESTRICTED" ? (
+                    <AlertOctagon className="w-5 h-5 text-rose-400 shrink-0" />
+                  ) : (
+                    <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
+                  )}
+                  <span>Indikator Shadowban:</span>
+                  <span
+                    className={`px-3 py-0.5 rounded-full text-xs font-extrabold uppercase tracking-wide border ${
+                      result.shadowban.status === "RESTRICTED"
+                        ? "bg-rose-500/20 text-rose-300 border-rose-500/50"
+                        : "bg-emerald-500/20 text-emerald-300 border-emerald-500/50"
+                    }`}
+                  >
+                    {result.shadowban.title}
+                  </span>
+                </div>
+
+                <div className="text-xs font-mono text-[#c9b49d]">
+                  Deteksi: {result.shadowban.status === "RESTRICTED" ? "Not Recommended / NFF" : "Normal FYP Feed"}
+                </div>
               </div>
               <p className="text-xs md:text-sm leading-relaxed opacity-90">{result.shadowban.reason}</p>
             </div>
@@ -293,10 +304,26 @@ export default function TikTokStatsPage() {
                   <div className="text-[11px] text-[#70c99a] mt-0.5">{result.stream.size}</div>
                 </div>
 
-                <div className="bg-[#1c140e]/80 border border-[rgba(255,205,150,0.12)] p-4 rounded-2xl">
-                  <div className="text-[10px] uppercase font-mono text-[#9e8870]">Metode Ingest</div>
-                  <div className="text-xs font-bold text-[#ffb066] mt-2 line-clamp-1">{result.stream.ingestMethod}</div>
-                  <div className="text-[10px] text-[#9e8870] mt-0.5">Audio {result.stream.audioSampleRate}</div>
+                <div className="bg-[#1c140e]/80 border border-[rgba(255,205,150,0.12)] p-4 rounded-2xl flex flex-col justify-between">
+                  <div>
+                    <div className="text-[10px] uppercase font-mono text-[#9e8870]">Metode Ingest</div>
+                    {result.stream.ingestMethod.startsWith("http") ? (
+                      <a
+                        href={result.stream.ingestMethod}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-xs font-bold text-[#ffb066] hover:underline flex items-center gap-1 mt-1 break-all"
+                      >
+                        <span>{result.stream.ingestMethod}</span>
+                        <ExternalLink className="w-3 h-3 shrink-0" />
+                      </a>
+                    ) : (
+                      <div className="text-xs font-bold text-[#ffb066] mt-1 line-clamp-2">
+                        {result.stream.ingestMethod}
+                      </div>
+                    )}
+                  </div>
+                  <div className="text-[10px] text-[#9e8870] mt-2">Audio {result.stream.audioSampleRate}</div>
                 </div>
               </div>
             </div>
