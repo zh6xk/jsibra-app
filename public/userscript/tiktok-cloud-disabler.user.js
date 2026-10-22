@@ -49,7 +49,7 @@
     'System: TikTok Studio HQ Ingest v2.0.0 (jsibra.me)',
     `Host: ${location.hostname}`,
     'Payload Interceptor: Cloud Canvas bypass armed',
-    'Metadata Verifier: jsibra.me / cutefish ready',
+    'Metadata Verifier: JSIBRA Stealth Anchor Armed',
     'Status: Direct Pass-Through Active'
   ];
 
@@ -162,11 +162,11 @@
     };
   }
 
-  // ================= METADATA DETECTOR (jsibra.me & cutefish) =================
+  // ================= METADATA DETECTOR (jsibra.me) =================
   async function isFilePatched(file) {
     if (!file) return false;
     try {
-      const checkStrings = ['jsibra.me', 'cutefish.my.id'];
+      const checkStrings = ['jsibra.me'];
       const slices = [];
       if (file.size <= 16 * 1024 * 1024) {
         slices.push(await file.arrayBuffer());

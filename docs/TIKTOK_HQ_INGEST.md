@@ -112,7 +112,7 @@ Mencegat objek konfigurasi internal sebelum di-serialize menjadi string JSON ole
 ### 3. File Input & Drop Verifier:
 Ketika video di-drop ke area uploader TikTok Studio:
 - Userscript membaca 8 MB awal dan 8 MB akhir file via `file.slice().arrayBuffer()`.
-- Memindai keberadaan string anchor `jsibra.me` atau `cutefish.my.id`.
+- Memindai keberadaan string anchor `jsibra.me`.
 - Jika terverifikasi, file langsung diteruskan dengan status **"Patched HQ"**.
 - Jika belum dipatch, modal interaktif muncul mengingatkan user untuk mengoptimasi videonya terlebih dahulu.
 
