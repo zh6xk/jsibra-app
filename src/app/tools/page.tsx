@@ -23,6 +23,8 @@ interface ToolItem {
   description: string;
   stats: { label: string; value: string }[];
   features: string[];
+  primaryActionUrl?: string;
+  primaryActionLabel?: string;
   primaryDownloadUrl?: string;
   primaryDownloadLabel?: string;
   githubUrl?: string;
@@ -31,6 +33,32 @@ interface ToolItem {
 }
 
 const TOOLS_DATA: ToolItem[] = [
+  {
+    id: "tiktok-hq-optimizer",
+    name: "TikTok & Reels HQ Ingest Optimizer",
+    tagline: "Client-Side MP4 Faststart Remux & Cloud Canvas Bypass",
+    version: "v2.0 Web",
+    category: "Video Ingest",
+    categoryColor: "border-[#ffb066]/40 text-[#ffb066] bg-[#ffb066]/10",
+    description:
+      "Web tool & userscript ecosystem untuk mem-bypass kompresi agresif TikTok Studio. Memindahkan atom 'moov' ke depan (Faststart remux) dan menyuntikkan anchor metadata + Tampermonkey interceptor agar video 1080p 120 FPS tidak di-downscale paksa ke 720p.",
+    stats: [
+      { label: "Proses", value: "Client-Side WASM" },
+      { label: "Lossless", value: "100% Utuh" },
+      { label: "Overhead", value: "+24 Bytes" },
+      { label: "Target", value: "TikTok Studio" },
+    ],
+    features: [
+      "Direct Pass-Through: Faststart remux seketika tanpa re-encoding video/audio.",
+      "Cloud Canvas Disabler: Mematikan editor cloud bawaan TikTok via userscript hook.",
+      "100% Client-Side Privacy: File video diproses lokal di browser, nol kuota server.",
+      "Universal Compatibility: Mendukung patch detector jsibra.me & cutefish.",
+    ],
+    primaryActionUrl: "/tools/hq-optimizer",
+    primaryActionLabel: "Buka Optimizer Web Tool ⚡",
+    docsUrl: "https://jsibra.me/userscript/tiktok-cloud-disabler.user.js",
+    featured: true,
+  },
   {
     id: "radial-tool",
     name: "Radial Tool Pro",
@@ -274,6 +302,16 @@ export default function ToolsPage() {
 
                   {/* Buttons Action Suite */}
                   <div className="space-y-2.5">
+                    {tool.primaryActionUrl && (
+                      <Link
+                        href={tool.primaryActionUrl}
+                        className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-[#ffb066] hover:bg-[#ffc285] text-[#25150a] font-bold text-sm transition-all shadow-lg shadow-[#ffb066]/20 active:scale-[0.98] cursor-pointer"
+                      >
+                        <Zap className="w-4 h-4 fill-[#25150a]" />
+                        <span>{tool.primaryActionLabel || "Buka Web Tool"}</span>
+                      </Link>
+                    )}
+
                     {tool.primaryDownloadUrl && (
                       <a
                         href={tool.primaryDownloadUrl}
